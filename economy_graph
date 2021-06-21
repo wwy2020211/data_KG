@@ -1,0 +1,158 @@
+from pandas import DataFrame
+from py2neo import Graph,Node,Relationship,NodeMatcher
+import pandas as pd
+import numpy as np
+import os
+
+import tushare as ts
+import csv
+import time
+import pandas as pd
+# 以下pro_api token可能已过期，可自行前往申请或者使用免费版本
+pro=ts.pro_api('4919d5cf1d8c7d00e468c17d5899cb6854fa689852f1b80373c48710')
+
+stock_basic = pro.stock_basic(list_status='L', fields='ts_code,symbol, name, industry')
+# 重命名行，便于后面导入neo4j
+basic_rename = {'ts_code': 'TS代码',
+                'symbol': '股票代码',
+                'name': '股票名称',
+                'industry': '行业'}
+stock_basic.rename(columns=basic_rename, inplace=True)
+# 保存为stock_basic.csv
+stock_basic.to_csv('stock_basic.csv', encoding='gbk')
+
+holders = pd.DataFrame(columns=('ts_code', 'ann_date', 'end_date', 'holder_name','hold_amount', 'hold_ratio'))
+# 获取一年内所有上市股票股东信息（可以获取一个报告期的）
+for i in range(3610):
+    code = stock_basic['TS代码'].values[i]
+    top10_holders = pro.top10_holders(ts_code=code, start_date='20180101', end_date='20181231')
+    holders = holders.append(top10_holders)
+    if i % 600 == 0:
+        print(i)
+    time.sleep(0.4)# 数据接口限制
+# 保存为stock_holders.csv
+holders.to_csv('stock_holders.csv', encoding='gbk')
+top10_holders = pro.top10_holders(ts_code='000001.SZ', start_date='20180101', end_date='20181231')
+
+concept_details = pd.DataFrame(columns=('id','concept_name','ts_code','name'))
+for i in range(300):
+    id = 'TS' + str(i)
+    concept_detail = pro.concept_detail(id=id)
+    concept_details = concept_details.append(concept_detail)
+    time.sleep(0.4)
+# 保存为concept_detail.csv
+concept_details.to_csv('stock_concept.csv',encoding='gbk')
+#获取前300股票
+for i in range(3610):
+    code = stock_basic['TS代码'].values[i]
+    price = pro.query('daily', ts_code=code, start_date='20200101',end_date='20201231')
+    price.to_csv("price.csv",index=False)
+ 
+ #df = ts.get_stock_basics()
+import numpy as np
+import os
+import math
+A = pd.read_csv("price.csv")
+#print(A["amount"])
+B = A["amount"]
+print(B)
+np.corrcoef(B[0],B[1])
+import numpy as np
+data_list_2 = []#接受收益率空列表对象
+for i in range(len(B)):
+    data_list_2.append([])
+    for j in range(len(B)-1):
+        log_rate=np.log((B[i]*B[j+1])/(B[i]*B[j]))
+        data_list_2[i].append(log_rate)
+    data_list_2[i].append(np.log((B[i]*B[0])/(B[i]*B[len(B)-1])))
+print(data_list_2)
+
+def cal_pccs(x, y, n):
+    """
+    warning: data format must be narray
+    :param x: Variable 1
+    :param y: The variable 2
+    :param n: The number of elements in x
+    :return: pccs
+    """
+    sum_xy = np.sum(np.sum(x*y))
+    sum_x = np.sum(np.sum(x))
+    sum_y = np.sum(np.sum(y))
+    sum_x2 = np.sum(np.sum(x*x))
+    sum_y2 = np.sum(np.sum(y*y))
+    pcc = (n*sum_xy-sum_x*sum_y)/np.sqrt((n*sum_x2-sum_x*sum_x)*(n*sum_y2-sum_y*sum_y))
+    return pcc
+pcc_300=[]
+df=A["high"]
+dff=np.array(df)
+for i in range(240):
+    for j in range(240):
+        pccs = cal_pccs(dff[i], dff[j],240)
+        pcc_300.append(pccs)
+print("股票间皮尔逊相关系数")
+print(pcc_300)
+
+#建立金融图谱
+
+from pandas import DataFrame
+from py2neo import Graph,Node,Relationship,NodeMatcher
+import pandas as pd
+import numpy as np
+import os
+# 连接Neo4j数据库
+G0=Graph("bolt://localhost:7687/", auth=("neo4j", "123456"))
+
+class DataToNeo4j(object):
+    def __init__(self):
+        link=G0
+        self.graphs=link
+        self.graphs.delete_all()
+        self.gupiao='股票'
+        self.gudong='股东'
+        self.concept='概念'
+    def create_node(self,concept_list,gupiao,gudong):  
+        i=0
+        #大类
+        rec_concept=[]
+        rec_gd=[]
+        for g in gupiao:
+            try:
+                gp_node=Node(self.gupiao,name=g)  
+                self.graphs.create(gp_node)
+                
+                if not (concept_list[i] in rec_concept):
+                    rec_concept.append(concept_list[i])
+                    concept_node=Node(self.concept,name=concept_list[i])
+                    self.graphs.create(concept_node)
+                else:
+                    concept_node=self.graphs.run("MATCH (n:`概念`) where n.name='"+concept_list[i]+"' RETURN n").data()[0]['n']
+                rel=Relationship(gp_node,'is a kind of',concept_node)
+                self.graphs.create(rel)
+                if not (gudong[i] in rec_gd):
+                    rec_gd.append(gudong[i])
+                    gd_node=Node(self.gudong,name=gudong[i])
+                    self.graphs.create(gd_node)   
+                else:
+                    gd_node=self.graphs.run("MATCH (n:`股东`) where n.name='"+gudong[i]+"' RETURN n")
+                rel=Relationship(gp_node,'belong to',gd_node)
+                self.graphs.create(rel)                
+            except KeyError:
+                print('wrong')
+            i=i+1
+            
+
+gds=list(holders["holder_name"][1:120])
+gsp=list(stock_basic["股票名称"][1:120])
+concepts=list(concept_details["concept_name"][1:120])
+dtn=DataToNeo4j()
+dtn.create_node(concepts,gsp,gds)
+
+graph=Graph("bolt://localhost:7687/", auth=("neo4j", "123456"))     #股票间以对数收益、皮尔逊系数建立关系
+for i in range(len(gsp)):
+    for j in range(len(gsp)):
+        if not i==j:
+            node1=graph.run("MATCH (n:`股票`) RETURN n").data()[i]['n']
+            node2=graph.run("MATCH (n:`股票`) RETURN n").data()[j]['n']
+            rel=Relationship(node1,str(rr[i][j]),node2)
+            graph.create(rel)
+© 2021 GitHub, Inc.
